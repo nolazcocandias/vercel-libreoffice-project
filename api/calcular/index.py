@@ -1,3 +1,4 @@
+
 import json
 import random
 import openpyxl
@@ -6,11 +7,15 @@ import os
 from http.server import BaseHTTPRequestHandler
 
 class handler(BaseHTTPRequestHandler):
+    # --- CORS headers (siempre) ---
     def _set_cors_headers(self):
-        self.send_header('Access-Control-Allow-Origin', 'https://nolazcocandias.github.io')
+        # Para probar: permitir cualquier origen. Luego puedes cambiar a tu dominio específico:
+        # 'https://nolazcocandias.github.io'
+        self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Accept')
-        self.send_header('Access-Control-Max-Age', '86400')
+        # Incluye los más comunes para fetch y navegadores modernos
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Accept, Origin, X-Requested-With')
+        self.send_header('Access-Control-Max-Age', '86400')  # cache preflight 24h
 
     def _json_response(self, status_code, payload):
         self.send_response(status_code)
@@ -19,16 +24,29 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(payload).encode('utf-8'))
 
+    # --- Preflight ---
     def do_OPTIONS(self):
+        # Responder SIEMPRE con 200 y los headers CORS
+        self.send_response(200)
+        self._set_cors_headers()
+        # Si quisieras limitar métodos/headers específicos, ya están en _set_cors_headers()
+        self.end_headers()
+
+    # (Opcional) algunos clientes prueban HEAD
+    def do_HEAD(self):
         self.send_response(200)
         self._set_cors_headers()
         self.end_headers()
 
+    # --- Salud (GET) ---
     def do_GET(self):
+        # Devuelve un ok simple
         self._json_response(200, {"status": "ok"})
 
+    # --- Lógica principal (POST) ---
     def do_POST(self):
         try:
+            # 1) Leer JSON
             content_length = int(self.headers.get('Content-Length', 0))
             raw = self.rfile.read(content_length).decode('utf-8') if content_length else '{}'
             data = json.loads(raw)
@@ -36,11 +54,13 @@ class handler(BaseHTTPRequestHandler):
             cantidad_pallets = int(data.get("cantidad_pallets", 0))
             meses_operacion = int(data.get("meses_operacion", 0))
 
+            # Validación básica
             if meses_operacion < 1 or meses_operacion > 12:
                 return self._json_response(400, {"error": "meses_operacion debe estar entre 1 y 12"})
             if cantidad_pallets < 0:
                 return self._json_response(400, {"error": "cantidad_pallets debe ser >= 0"})
 
+            # 2) Generar IN/OUT aleatorio (tu lógica)
             in_values = [0] * 12
             out_values = [0] * 12
 
@@ -69,10 +89,12 @@ class handler(BaseHTTPRequestHandler):
                     stock -= val
                     remaining_out -= val
 
+            # 3) Rutas del Excel (leer del repo, escribir en /tmp)
             base_dir = os.path.dirname(__file__)
             src_xlsx = os.path.abspath(os.path.join(base_dir, '..', '..', 'simulacion.xlsx'))
             tmp_xlsx = '/tmp/simulacion.xlsx'
 
+            # 4) Actualizar Excel
             wb = openpyxl.load_workbook(src_xlsx)
             ws = wb["cliente"]
             for i in range(12):
@@ -80,15 +102,21 @@ class handler(BaseHTTPRequestHandler):
                 ws[f"E{9+i}"] = out_values[i]
             wb.save(tmp_xlsx)
 
+            # 5) Intentar recalcular con LibreOffice (si está disponible)
             recalculated_path = tmp_xlsx
             try:
-                subprocess.run(["libreoffice", "--headless", "--calc", "--convert-to", "xlsx", "--outdir", "/tmp", tmp_xlsx],
-                               check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                subprocess.run(
+                    ["libreoffice", "--headless", "--calc", "--convert-to", "xlsx", "--outdir", "/tmp", tmp_xlsx],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30
+                )
+                # Si se generó, úsalo
                 if os.path.exists('/tmp/simulacion.xlsx'):
                     recalculated_path = '/tmp/simulacion.xlsx'
             except Exception:
+                # Si falla, seguimos con data_only (sin recálculo de fórmulas)
                 pass
 
+            # 6) Leer datos finales (data_only=True)
             wb2 = openpyxl.load_workbook(recalculated_path, data_only=True)
             ws2 = wb2["cliente"]
 
@@ -120,4 +148,5 @@ class handler(BaseHTTPRequestHandler):
             return self._json_response(200, resultado)
 
         except Exception as e:
+            # Cualquier error inesperado
             return self._json_response(500, {"error": str(e)})
